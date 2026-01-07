@@ -1,0 +1,65 @@
+### 当这是一个火山CDN相关报警时：
+  1. **CDN流量异常检查**：使用 `searchVolcLog` 工具。
+     - 查询今日(`total_requests_today`)与昨日(`total_requests_yesterday`)的总请求量。
+     - 计算变化率 = (今日 - 昨日) / 昨日。
+     - **判定标准**：变化率 > 15% 为异常；> 30% 为高风险。
+     - **特殊例外**：若域名为 `sto.chanapp.chanjet.com`，发布波动（18:00--23:00，次日6点）忽略，但需要告知此情况；
+     - **下钻分析**：若异常，需按照域名维度分组，输出具体的异常域名及流量变化详情。
+  2. **CDN命中率(Hit Ratio)检查**：使用 `searchVolcLog` 工具。
+     - 检查命中率(`ds_http_bd_status_hit`='HIT')是否较昨日下降。
+     - **判定标准**：下降 > 10% 为异常；下降 > 20% 为严重。
+     - **下钻分析**：定位异常域名，提取 MISS 状态的 Top URL，初步分析是源站不稳定、访问行为异常还是缓存规则异常。
+  3. **CDN状态码质量检查**：使用 `searchVolcLog` 工具，重点关注以下阈值：
+     - 403 占比 > 3%
+     - 404 占比 > 5%
+     - 405 出现明显上升
+     - 5xx 占比 > 1% (严重) / > 3% (高危)
+     - **下钻分析**：异常时输出 Top URL、异常 IP (`client_ip`)、UA (`ds_http_ua`) 和 Referer。需区分是源站问题还是CDN链路问题。
+  4. **CDN回源5xx专项检查**：使用 `searchVolcLog` 工具。
+     - **判定标准**：若回源5xx (`origin_5xx_total`) 较昨日上升 > 20% 或 回源5xx比例 (`origin_5xx_ratio`) > 1%。
+     - **下钻分析**：输出异常域名、异常 URL 及可能的后端原因。
+  5. **根因优先级判断**：
+     - 若 CDN 异常和应用异常同时出现，遵循优先级：**源站异常 > 状态码异常 > 性能类异常（命中率/请求量） > 行为异常（爬虫/攻击）**。
+
+## 日志服务配置详情表
+### 基础信息
+| 配置项       | 值                  |
+|--------------|---------------------|
+| **Project**  | `prod-chanjet`      |
+| **Region**   | `cn-beijing`        |
+| **工具名称**  | `searchVolcLog`      |
+| **核心字段** | `client_ip`(客户端IP), `domain`(域名), `ds_http_status`(状态码), `ds_http_bd_status_hit`(命中状态), `ds_req_time`(耗时), `ds_http_resp_size`(大小), `server_ip`(边缘IP), `__time__` |
+
+
+## 字段说明
+
+### CDN专用字段说明
+| 字段名 (Key)              | 说明                     | 备注 |
+|---------------------------|--------------------------|------|
+| `client_ip`               | 客户端请求IP             | 对应通用字段 remote_ip |
+| `domain`                  | 请求目标域名             | - |
+| `ds_http_bd_status_hit`   | CDN缓存命中状态          | 枚举值：MISS(未命中)/HIT(命中) |
+| `ds_http_status`          | HTTP响应状态码           | 对应通用字段 request_status |
+| `ds_req_time`             | 请求总耗时(秒)           | 对应通用字段 request |
+| `server_ip`               | CDN边缘节点服务器IP      | 对应通用字段 upstream_addr |
+| `ds_http_bd_status`       | CDN内部传输状态          | TCP_MISS 表示需回源 |
+| `ds_http_uri`             | 完整请求URI              | 含路径和参数 |
+| `ds_http_resp_size`       | 响应包总大小(字节)       | - |
+| `time`                    | 日志记录时间             | UTC+8 |
+
+# searchVolcLog工具查询语法规则 :​
+1. 基本结构: 使用 SQL 语法进行查询，通常以 `* |` 开头。
+2. SELECT/WHERE: 提取数据及过滤条件。
+3. GROUP BY/ORDER BY: 分组与排序，用于聚合分析。
+4. LIMIT: 限制返回行数（默认100）。
+5. 常用查询示例（请严格参考以下模版构造查询）：
+   - **总流量查询**: `* | select sum(ds_http_resp_size)*1.1/(1000*1000*1000)`
+   - **流量异常Top域名**: `* | select domain,sum(ds_http_resp_size)*1.1/(1000*1000*1000) AS ll group by domain order by domain`
+   - **命中率分析**: `* | SELECT ROUND(100 * COUNT(CASE WHEN ds_http_bd_status_hit = 'HIT' THEN 1 END) * 1.0 / COUNT(*), 2) AS value, ((__time__ - __time__ % 30000) / 1000) AS t GROUP BY t ORDER BY t`
+   - **5xx/403分析**: `ds_http_status >= 500 | SELECT domain, count(*) as cnt GROUP BY domain ORDER by cnt desc`
+   - **回源5xx分析**: `ds_http_status >= 500 and ds_http_bd_status_hit: MISS| SELECT domain, count(*) as cnt GROUP BY domain ORDER by cnt desc`
+
+域名对应的产品线？
+cms.static.chanjet.com
+sto.chanapp.chanjet.com 
+
